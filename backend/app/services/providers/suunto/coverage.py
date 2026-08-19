@@ -15,10 +15,25 @@ DAILY_STAT_SERIES: dict[str, SeriesType] = {
     "energyconsumption": SeriesType.energy,
 }
 
+# Series that only the workout FIT export carries (GET /v3/workouts/{key}/fit),
+# parsed by the generic fit_parser. Everything else Suunto exposes is a summary.
+FIT_WORKOUT_SERIES: frozenset[SeriesType] = frozenset(
+    {
+        SeriesType.latitude,
+        SeriesType.longitude,
+        SeriesType.elevation,
+        SeriesType.speed,
+        SeriesType.cadence,
+        SeriesType.power,
+        SeriesType.air_temperature,
+    }
+)
+
 TIMESERIES: frozenset[SeriesType] = frozenset(
     {
         *ACTIVITY_SERIES.values(),  # /247samples/activity
         *DAILY_STAT_SERIES.values(),  # /247/daily-activity-statistics
+        *FIT_WORKOUT_SERIES,  # /v3/workouts/{key}/fit
         SeriesType.resting_heart_rate,  # /247samples/sleep (HRMin, single inline use)
     }
 )

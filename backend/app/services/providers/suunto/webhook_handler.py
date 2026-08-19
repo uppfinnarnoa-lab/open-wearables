@@ -2,7 +2,8 @@
 
 Suunto delivers data inline (PUSH mode) for all event types:
 - WORKOUT_CREATED: full workout object + gear; we fetch the canonical record via
-  REST using the workoutKey so we always get the schema we expect.
+  REST using the workoutKey so we always get the schema we expect, then pull the
+  workout's FIT export — the only Suunto source for the GPS track.
 - SUUNTO_247_SLEEP_CREATED / SUUNTO_247_ACTIVITY_CREATED / SUUNTO_247_RECOVERY_CREATED:
   full samples array delivered in-band; processed directly.
 - ROUTE_CREATED: ignored (routes are not stored).
@@ -244,7 +245,17 @@ class SuuntoWebhookHandler(BaseWebhookHandler):
             for raw in workouts_list:
                 if self.suunto_workouts.process_push_activity(db, user_id, raw) is not None:
                     saved += 1
-            return {"status": "saved", "workout_key": str(workout_key), "saved_count": saved}
+            # Only now, with the workout row committed, is the FIT worth pulling:
+            # its segments and zones are patched onto that row's detail, looked up
+            # by external_id. One call per event, never per workout in the list —
+            # the developer tier allows just 200 calls a week.
+            fit_samples = self.suunto_workouts.import_workout_fit(db, user_id, str(workout_key)) if saved else 0
+            return {
+                "status": "saved",
+                "workout_key": str(workout_key),
+                "saved_count": saved,
+                "fit_samples": fit_samples,
+            }
         except IntegrityError:
             db.rollback()
             log_structured(

@@ -290,18 +290,23 @@ def download_binary_content(
     oauth: BaseOAuthTemplate,
     provider_name: str,
     url: str,
+    headers: dict[str, str] | None = None,
 ) -> bytes:
     """Download binary content from a full URL using OAuth Bearer authentication.
 
-    Used for endpoints that return binary data (e.g. Garmin activityFiles FIT download).
-    The URL may contain additional auth params (e.g. token=...) alongside the Bearer header.
+    Used for endpoints that return binary data (e.g. Garmin activityFiles FIT download,
+    Suunto workout FIT export). The URL may contain additional auth params
+    (e.g. token=...) alongside the Bearer header. Providers that gate their API behind
+    an extra header (e.g. Suunto's Ocp-Apim-Subscription-Key) pass it via `headers`.
     Retries up to MAX_RETRIES times on 429 with exponential backoff.
     """
     access_token = _get_valid_token(db, user_id, provider_name, connection_repo, oauth)
-    headers = {"Authorization": f"Bearer {access_token}"}
+    request_headers = {"Authorization": f"Bearer {access_token}"}
+    if headers:
+        request_headers.update(headers)
 
     for attempt in range(MAX_RETRIES + 1):
-        response = httpx.get(url, headers=headers, timeout=30.0, follow_redirects=True)
+        response = httpx.get(url, headers=request_headers, timeout=30.0, follow_redirects=True)
         if response.status_code == 429 and attempt < MAX_RETRIES:
             backoff_delay = RETRY_BASE_DELAY * (2**attempt)
             log_structured(

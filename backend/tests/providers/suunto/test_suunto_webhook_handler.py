@@ -12,7 +12,7 @@ Bugs fixed:
    optional with a `startTime + totalTime` fallback in `_normalize_workout`.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -273,6 +273,7 @@ class TestProcessWorkoutPayloadShapes:
     ) -> None:
         """Single-dict `payload` (real webhook shape) is processed exactly once with the dict itself."""
         handler.suunto_workouts.get_workout_detail.return_value = live_response
+        handler.suunto_workouts.import_workout_fit.return_value = 120
 
         result = handler._process_workout(MagicMock(), uuid4(), webhook_payload, TRACE_ID)
 
@@ -284,7 +285,7 @@ class TestProcessWorkoutPayloadShapes:
         handler.suunto_workouts.process_push_activity.assert_called_once()
         passed = handler.suunto_workouts.process_push_activity.call_args.args[2]
         assert passed == live_workout_payload
-        assert result == {"status": "saved", "workout_key": WORKOUT_KEY, "saved_count": 1}
+        assert result == {"status": "saved", "workout_key": WORKOUT_KEY, "saved_count": 1, "fit_samples": 120}
 
     def test_list_payload_processes_each_entry(
         self,
@@ -294,6 +295,7 @@ class TestProcessWorkoutPayloadShapes:
     ) -> None:
         """List `payload` (sync shape) iterates each workout dict."""
         second_workout = {**live_workout_payload, "workoutKey": "second"}
+        handler.suunto_workouts.import_workout_fit.return_value = 7
         handler.suunto_workouts.get_workout_detail.return_value = {
             "error": None,
             "payload": [live_workout_payload, second_workout],
@@ -305,7 +307,9 @@ class TestProcessWorkoutPayloadShapes:
         assert handler.suunto_workouts.process_push_activity.call_count == 2
         processed = [c.args[2] for c in handler.suunto_workouts.process_push_activity.call_args_list]
         assert processed == [live_workout_payload, second_workout]
-        assert result == {"status": "saved", "workout_key": WORKOUT_KEY, "saved_count": 2}
+        assert result == {"status": "saved", "workout_key": WORKOUT_KEY, "saved_count": 2, "fit_samples": 7}
+        # One FIT call per event, not per workout — the developer tier allows 200 calls/week.
+        handler.suunto_workouts.import_workout_fit.assert_called_once()
 
     def test_missing_workout_key_returns_error(self, handler: SuuntoWebhookHandler) -> None:
         """`WORKOUT_CREATED` without a workoutKey/workoutId is rejected without an API call."""
@@ -334,6 +338,37 @@ class TestProcessWorkoutPayloadShapes:
 
         assert result == {"status": "ignored", "reason": "duplicate_workout", "workout_key": WORKOUT_KEY}
         db.rollback.assert_called_once()
+
+    def test_fit_pulled_after_workout_saved(
+        self,
+        handler: SuuntoWebhookHandler,
+        webhook_payload: dict,
+        live_response: dict,
+    ) -> None:
+        """The GPS track only exists in the FIT, so WORKOUT_CREATED must pull it."""
+        handler.suunto_workouts.get_workout_detail.return_value = live_response
+        handler.suunto_workouts.import_workout_fit.return_value = 512
+        db = MagicMock()
+
+        result = handler._process_workout(db, uuid4(), webhook_payload, TRACE_ID)
+
+        handler.suunto_workouts.import_workout_fit.assert_called_once_with(db, ANY, WORKOUT_KEY)
+        assert result["fit_samples"] == 512
+
+    def test_fit_not_pulled_when_nothing_saved(
+        self,
+        handler: SuuntoWebhookHandler,
+        webhook_payload: dict,
+        live_response: dict,
+    ) -> None:
+        """No workout row means nothing to attach segments to — do not spend a call."""
+        handler.suunto_workouts.get_workout_detail.return_value = live_response
+        handler.suunto_workouts.process_push_activity.return_value = None
+
+        result = handler._process_workout(MagicMock(), uuid4(), webhook_payload, TRACE_ID)
+
+        handler.suunto_workouts.import_workout_fit.assert_not_called()
+        assert result["fit_samples"] == 0
 
 
 class TestLivePayloadParsing:

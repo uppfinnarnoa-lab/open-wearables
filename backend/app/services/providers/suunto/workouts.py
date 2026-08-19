@@ -3,10 +3,13 @@ from decimal import Decimal
 from typing import Any, Iterable
 from uuid import UUID, uuid4
 
+from app.config import settings
 from app.constants.workout_types.suunto import get_unified_workout_type
 from app.database import DbSession
-from app.models import DataSource
+from app.models import DataPointSeries, DataSource, EventRecordDetail
+from app.repositories.data_point_series_repository import DataPointSeriesRepository
 from app.repositories.data_source_repository import DataSourceRepository
+from app.repositories.event_record_detail_repository import EventRecordDetailRepository
 from app.schemas.enums import ProviderName
 from app.schemas.model_crud.activities import (
     EventRecordCreate,
@@ -15,8 +18,18 @@ from app.schemas.model_crud.activities import (
 )
 from app.schemas.providers.suunto import WorkoutJSON as SuuntoWorkoutJSON
 from app.services.event_record_service import event_record_service
+from app.services.fit_parser import parse_fit_file
+from app.services.providers.api_client import download_binary_content
 from app.services.providers.templates.base_workouts import BaseWorkoutsTemplate
+from app.services.raw_payload_storage import store_fit_file
 from app.utils.dates import offset_to_iso
+from app.utils.structured_logging import log_structured
+
+# Suunto Workout API (base path v3/workouts), operation `export-workout-fit`:
+#   GET https://cloudapi.suunto.com/v3/workouts/{workoutKey}/fit -> application/octet-stream
+# The older /v2/workout/exportFit/{key} form belongs to the API Zone's
+# "SUUNTO WORKOUT API (DEPRECATED)" product and must not be used.
+FIT_EXPORT_ENDPOINT: str = "/v3/workouts/{workout_key}/fit"
 
 
 class SuuntoWorkouts(BaseWorkoutsTemplate):
@@ -25,6 +38,8 @@ class SuuntoWorkouts(BaseWorkoutsTemplate):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.data_source_repo = DataSourceRepository(DataSource)
+        self.data_point_repo = DataPointSeriesRepository(DataPointSeries)
+        self.event_record_detail_repo = EventRecordDetailRepository(EventRecordDetail)
 
     def _get_suunto_headers(self) -> dict[str, str]:
         """Get Suunto-specific headers including subscription key."""
@@ -264,6 +279,12 @@ class SuuntoWorkouts(BaseWorkoutsTemplate):
             detail_for_record = details.model_copy(update={"record_id": created_record.id})
             event_record_service.create_detail(db, detail_for_record)
             count += 1
+            # Backfilled workouts need their track too, otherwise only workouts
+            # that arrive by webhook after connecting are ever mappable. Gated on
+            # ingest_workout_samples because it costs one extra API call per
+            # workout, and Suunto's developer tier allows only 200 calls/week.
+            if settings.ingest_workout_samples and record.external_id:
+                self.import_workout_fit(db, user_id, record.external_id)
 
         return count
 
@@ -284,6 +305,143 @@ class SuuntoWorkouts(BaseWorkoutsTemplate):
         if extensions:
             params = {"extensions": ",".join(extensions)}
         return self._make_api_request(db, user_id, f"/v3/workouts/{workout_key}", params=params, headers=headers)
+
+    # ------------------------------------------------------------------
+    # FIT export
+    #
+    # Suunto's workout JSON carries summaries only. The FIT export is the only
+    # place per-sample data lives — GPS track above all — so without it a Suunto
+    # workout can never be drawn on a map.
+    # ------------------------------------------------------------------
+
+    def fetch_workout_fit(self, db: DbSession, user_id: UUID, workout_key: str) -> bytes:
+        """Download the raw FIT export for one workout.
+
+        Requires both the OAuth bearer token and the Ocp-Apim-Subscription-Key
+        header, so it cannot go through ``_make_api_request`` (which expects JSON).
+        """
+        url = f"{self.api_base_url}{FIT_EXPORT_ENDPOINT.format(workout_key=workout_key)}"
+        return download_binary_content(
+            db=db,
+            user_id=user_id,
+            connection_repo=self.connection_repo,
+            oauth=self.oauth,
+            provider_name=self.provider_name,
+            url=url,
+            headers=self._get_suunto_headers(),
+        )
+
+    def import_workout_fit(self, db: DbSession, user_id: UUID, workout_key: str) -> int:
+        """Fetch, parse and persist the FIT export for one workout.
+
+        Mirrors the Garmin activityFiles path: download -> optional S3 archive ->
+        parse_fit_file -> segments/zones onto workout_details -> samples into
+        data_point_series. Returns the number of samples written.
+
+        Never raises. A workout whose FIT is missing or unparseable is still worth
+        keeping, so every failure is logged and reported as zero samples.
+        """
+        try:
+            fit_bytes = self.fetch_workout_fit(db, user_id, workout_key)
+        except Exception as e:
+            log_structured(
+                self.logger,
+                "warning",
+                "Failed to download Suunto FIT file",
+                provider=self.provider_name,
+                task="import_workout_fit",
+                user_id=str(user_id),
+                workout_key=str(workout_key),
+                error=str(e),
+            )
+            return 0
+
+        store_fit_file(
+            provider=self.provider_name,
+            fit_bytes=fit_bytes,
+            user_id=str(user_id),
+            activity_id=str(workout_key),
+        )
+
+        try:
+            fit_result = parse_fit_file(fit_bytes, user_id, source=self.provider_name)
+        except Exception as e:
+            log_structured(
+                self.logger,
+                "warning",
+                "Failed to parse Suunto FIT file",
+                provider=self.provider_name,
+                task="import_workout_fit",
+                user_id=str(user_id),
+                workout_key=str(workout_key),
+                error=str(e),
+            )
+            return 0
+
+        if fit_result.segments or fit_result.hr_zones or fit_result.power_zones:
+            self._save_fit_workout_fields(db, user_id, str(workout_key), fit_result)
+
+        samples_written = 0
+        # Same gate as Garmin: per-sample rows are large, so a deployment opts in.
+        if settings.ingest_workout_samples and fit_result.samples:
+            samples_written = int(self.data_point_repo.bulk_create(db, fit_result.samples))
+
+        log_structured(
+            self.logger,
+            "info",
+            "Parsed Suunto FIT file",
+            provider=self.provider_name,
+            task="import_workout_fit",
+            user_id=str(user_id),
+            workout_key=str(workout_key),
+            segments=len(fit_result.segments),
+            samples=samples_written,
+        )
+        return samples_written
+
+    def _save_fit_workout_fields(
+        self,
+        db: DbSession,
+        user_id: UUID,
+        workout_key: str,
+        fit_result: Any,
+    ) -> None:
+        """Write segments and zones from the FIT onto the workout's detail row.
+
+        No-op when the event_record does not exist yet — callers import the FIT
+        after saving the workout, so a miss means the workout itself failed.
+        """
+        record = self.workout_repo.get_by_external_id(db, user_id, workout_key, source=self.provider_name)
+        if record is None:
+            log_structured(
+                self.logger,
+                "warning",
+                "No event_record for Suunto workout — FIT workout fields not saved",
+                provider=self.provider_name,
+                task="_save_fit_workout_fields",
+                user_id=str(user_id),
+                workout_key=workout_key,
+            )
+            return
+
+        fields: dict[str, Any] = {"segments": fit_result.segments}
+        if fit_result.hr_zones is not None:
+            fields["hr_zones"] = fit_result.hr_zones.model_dump()
+        if fit_result.power_zones is not None:
+            fields["power_zones"] = fit_result.power_zones.model_dump()
+        try:
+            self.event_record_detail_repo.update_workout_fields(db, record.id, fields)
+        except Exception as e:
+            log_structured(
+                self.logger,
+                "warning",
+                "Failed to save Suunto FIT workout fields",
+                provider=self.provider_name,
+                task="_save_fit_workout_fields",
+                user_id=str(user_id),
+                workout_key=workout_key,
+                error=str(e),
+            )
 
     def process_push_activity(self, db: DbSession, user_id: UUID, raw_workout: Any) -> UUID | None:
         """Save a single workout received via the live webhook push path.
