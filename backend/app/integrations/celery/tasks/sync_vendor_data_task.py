@@ -38,6 +38,23 @@ def _emit_sync_status(fn: Any, /, *args: Any, **kwargs: Any) -> None:
         )
 
 
+def _live_sync_mode(provider: str, provider_settings: Any, factory: Any) -> LiveSyncMode | None:
+    """The configured live-sync mode, falling back to the provider's own default.
+
+    The fallback used to be a hardcoded PULL, which contradicted
+    ``default_live_sync_mode`` -- the same property ``connections.py`` reports
+    over the API. A provider that declares itself webhook-driven was therefore
+    advertised as "webhook" and polled on the beat schedule anyway, and the only
+    way to stop it was to write a settings row by hand. For a provider on a
+    metered plan those polls are spent budget returning data the webhook has
+    already delivered.
+    """
+    setting = provider_settings.get(provider)
+    if setting is not None and setting.live_sync_mode is not None:
+        return setting.live_sync_mode
+    return factory.get_provider(provider).default_live_sync_mode
+
+
 def _include_in_periodic_pull(caps: Any, live_sync_mode: LiveSyncMode | None, is_historical: bool) -> bool:
     """True if the provider should be included in this REST pull run.
 
@@ -132,9 +149,7 @@ def sync_vendor_data(
                 for c in connections
                 if _include_in_periodic_pull(
                     factory.get_provider(c.provider).capabilities,
-                    provider_settings[c.provider].live_sync_mode
-                    if c.provider in provider_settings
-                    else LiveSyncMode.PULL,
+                    _live_sync_mode(c.provider, provider_settings, factory),
                     is_historical,
                 )
             ]
