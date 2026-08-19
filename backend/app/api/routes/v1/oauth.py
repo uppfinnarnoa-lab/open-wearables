@@ -109,7 +109,16 @@ def oauth_callback(
             from app.integrations.celery.tasks import sync_vendor_data
 
             now = datetime.now(timezone.utc)
-            start_date = (now - timedelta(days=90)).isoformat()
+            # Honour the provider's own ceiling. The 90-day default is a
+            # convenience for integrators who have not called /sync/historical
+            # themselves, but a provider that declares max_historical_days means
+            # it — either the platform refuses to go further back, or the call
+            # budget cannot afford it. Asking for 90 days regardless spends quota
+            # on a window the provider was never going to serve in full.
+            days = 90
+            if caps.max_historical_days is not None:
+                days = min(days, caps.max_historical_days)
+            start_date = (now - timedelta(days=days)).isoformat()
             sync_vendor_data.delay(
                 user_id=str(oauth_state.user_id),
                 start_date=start_date,

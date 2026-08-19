@@ -1,3 +1,4 @@
+from app.schemas.auth import LiveSyncMode
 from app.services.providers.base_strategy import BaseProviderStrategy, ProviderCapabilities, ProviderCoverage
 from app.services.providers.suunto.coverage import HEALTH_SCORES, SLEEP_FIELDS, TIMESERIES, WORKOUT_FIELDS
 from app.services.providers.suunto.data_247 import Suunto247Data
@@ -54,4 +55,25 @@ class SuuntoStrategy(BaseProviderStrategy):
     @property
     def capabilities(self) -> ProviderCapabilities:
         # Historical sync uses REST (rest_pull); live data via webhooks (webhook_stream).
-        return ProviderCapabilities(rest_pull=True, webhook_stream=True)
+        #
+        # max_historical_days is a budget, not a platform limit. Suunto's Developer
+        # tier allows 200 calls a week in total, and pulling the FIT export costs one
+        # call per workout on top of the listing. A 90-day backfill for a single
+        # active athlete is enough to spend most of that week on the first connect.
+        return ProviderCapabilities(rest_pull=True, webhook_stream=True, max_historical_days=30)
+
+    @property
+    def default_live_sync_mode(self) -> LiveSyncMode:
+        """Webhook, not pull — Suunto's notifications carry their payload.
+
+        The base rule prefers PULL whenever rest_pull exists, which is right for a
+        provider whose webhook only pings and leaves the data to be fetched. Suunto
+        does not ping: WORKOUT_CREATED and the 24/7 events arrive complete, so a
+        periodic pull re-asks for what already came in and almost always returns
+        nothing new. Against a 200-call weekly budget an hourly poll per user
+        exhausts the quota in a day and buys no freshness at all.
+
+        REST stays available for historical backfill, which _include_in_periodic_pull
+        admits regardless of this mode.
+        """
+        return LiveSyncMode.WEBHOOK
