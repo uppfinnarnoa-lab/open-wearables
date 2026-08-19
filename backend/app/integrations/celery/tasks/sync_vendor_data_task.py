@@ -144,15 +144,23 @@ def sync_vendor_data(
             # Only sync providers in pull mode. Push-only providers (Garmin, Apple SDK)
             # deliver data via webhooks/SDK and must not be polled here.
             # Historical backfill always uses REST regardless of live_sync_mode.
-            connections = [
-                c
-                for c in connections
-                if _include_in_periodic_pull(
-                    factory.get_provider(c.provider).capabilities,
-                    _live_sync_mode(c.provider, provider_settings, factory),
-                    is_historical,
-                )
-            ]
+            #
+            # The filter belongs to the beat schedule alone. A caller that names
+            # providers explicitly is asking on demand — a user pressing "sync
+            # now", or an endpoint syncing one provider — and a webhook-driven
+            # provider still has to answer that. Filtering it here turned the
+            # request into a silent no-op for precisely the providers whose data
+            # does not arrive any other way when no webhook is configured.
+            if not providers:
+                connections = [
+                    c
+                    for c in connections
+                    if _include_in_periodic_pull(
+                        factory.get_provider(c.provider).capabilities,
+                        _live_sync_mode(c.provider, provider_settings, factory),
+                        is_historical,
+                    )
+                ]
 
             if not connections:
                 log_structured(

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy.orm import Session
 
 from app.integrations.celery.tasks.sync_vendor_data_task import sync_vendor_data
-from app.schemas.auth import ConnectionStatus
+from app.schemas.auth import ConnectionStatus, LiveSyncMode
 from app.utils.sync_params import build_sync_params
 from tests.factories import UserConnectionFactory, UserFactory
 
@@ -45,6 +45,9 @@ class TestSyncVendorDataTask:
 
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = mock_workouts
         mock_get_provider.return_value = mock_strategy
@@ -89,6 +92,9 @@ class TestSyncVendorDataTask:
 
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = mock_workouts
         mock_get_provider.return_value = mock_strategy
@@ -130,6 +136,9 @@ class TestSyncVendorDataTask:
 
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = mock_workouts
         mock_get_provider.return_value = mock_strategy
@@ -167,6 +176,9 @@ class TestSyncVendorDataTask:
 
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = mock_workouts
         mock_get_provider.return_value = mock_strategy
@@ -231,6 +243,9 @@ class TestSyncVendorDataTask:
 
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = mock_workouts
         mock_get_provider.return_value = mock_strategy
@@ -266,6 +281,9 @@ class TestSyncVendorDataTask:
 
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = mock_workouts
         mock_get_provider.return_value = mock_strategy
@@ -298,6 +316,9 @@ class TestSyncVendorDataTask:
         # Mock provider without workout support
         mock_strategy = MagicMock()
         mock_strategy.capabilities.rest_pull = True
+        # Without a settings row the task falls back to the strategy's own
+        # declared default; a bare MagicMock here filters every connection out.
+        mock_strategy.default_live_sync_mode = LiveSyncMode.PULL
         mock_strategy.capabilities.webhook_stream = False
         mock_strategy.workouts = None
         # Also ensure data_247 is not set so the strategy is still processed
