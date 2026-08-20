@@ -372,6 +372,76 @@ class TestSyncVendorDataTask:
         assert "user_id" in result["errors"]
         assert "Invalid UUID format" in result["errors"]["user_id"]
 
+    @patch("app.integrations.celery.tasks.sync_vendor_data_task.SessionLocal")
+    @patch("app.services.providers.factory.ProviderFactory.get_provider")
+    def test_webhook_provider_is_skipped_by_the_periodic_run(
+        self,
+        mock_get_provider: MagicMock,
+        mock_session_local: MagicMock,
+        db: Session,
+        mock_celery_app: MagicMock,
+    ) -> None:
+        """A webhook-driven provider is not polled on the schedule.
+
+        Its data arrives by push, so a periodic pull re-asks for what already
+        came in. On a metered plan that is spent budget for nothing.
+        """
+        user = UserFactory()
+        UserConnectionFactory(user=user, provider="suunto", status=ConnectionStatus.ACTIVE)
+
+        mock_session_local.return_value.__enter__.return_value = db
+        mock_session_local.return_value.__exit__.return_value = None
+
+        mock_workouts = MagicMock()
+        mock_strategy = MagicMock()
+        mock_strategy.capabilities.rest_pull = True
+        mock_strategy.capabilities.webhook_stream = True
+        mock_strategy.default_live_sync_mode = LiveSyncMode.WEBHOOK
+        mock_strategy.workouts = mock_workouts
+        mock_get_provider.return_value = mock_strategy
+
+        # No provider list: this is the beat schedule's own run.
+        result = sync_vendor_data(str(user.id))
+
+        assert result["providers_synced"] == {}
+        mock_workouts.load_data.assert_not_called()
+
+    @patch("app.integrations.celery.tasks.sync_vendor_data_task.SessionLocal")
+    @patch("app.services.providers.factory.ProviderFactory.get_provider")
+    def test_webhook_provider_still_answers_an_explicit_sync(
+        self,
+        mock_get_provider: MagicMock,
+        mock_session_local: MagicMock,
+        db: Session,
+        mock_celery_app: MagicMock,
+    ) -> None:
+        """Naming a provider is a request, not a poll, and must be honoured.
+
+        POST /providers/{p}/users/{id}/sync reaches this task with
+        is_historical=False. Applying the schedule's filter here made "sync now"
+        a silent no-op for precisely the providers that have no other way in
+        when no webhook is configured.
+        """
+        user = UserFactory()
+        UserConnectionFactory(user=user, provider="suunto", status=ConnectionStatus.ACTIVE)
+
+        mock_session_local.return_value.__enter__.return_value = db
+        mock_session_local.return_value.__exit__.return_value = None
+
+        mock_workouts = MagicMock()
+        mock_workouts.load_data.return_value = True
+        mock_strategy = MagicMock()
+        mock_strategy.capabilities.rest_pull = True
+        mock_strategy.capabilities.webhook_stream = True
+        mock_strategy.default_live_sync_mode = LiveSyncMode.WEBHOOK
+        mock_strategy.workouts = mock_workouts
+        mock_get_provider.return_value = mock_strategy
+
+        result = sync_vendor_data(str(user.id), providers=["suunto"])
+
+        assert "suunto" in result["providers_synced"]
+        mock_workouts.load_data.assert_called_once()
+
 
 class TestBuildSyncParams:
     """Test suite for build_sync_params helper function."""
