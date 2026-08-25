@@ -95,6 +95,22 @@ This company requirement applies to the **Suunto Cloud API** used here (`cloudap
     <Warning>
     Keep your Client Secret and subscription key server-side only - never log or expose them in client code.
     </Warning>
+
+    <Note>
+    **If authorization fails with `At least one redirect_uri must be registered with the client`**, Suunto is
+    telling you it has no redirect URI on file for this client. Two things produce that message:
+
+    1. The **Redirect URI** field above is empty in your Suunto profile. Fill it in with
+       `{API_BASE_URL}/api/v1/oauth/suunto/callback` and save.
+    2. Your `.env` has a bare `SUUNTO_REDIRECT_URI=` line. The deprecated per-provider
+       variable is only meant to override `API_BASE_URL`, but an empty value used to
+       count as an override and sent `redirect_uri=` — Suunto then falls back to the
+       registered one and finds none. A blank value now falls through to
+       `API_BASE_URL`; on older versions, delete the line.
+
+    The full authorize URL tells you which: open it and look at the `redirect_uri`
+    parameter. Empty means (2), populated means (1).
+    </Note>
   </Step>
 
   <Step title="Configure credentials in Open Wearables">
