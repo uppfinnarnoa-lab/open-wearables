@@ -18,6 +18,7 @@ from app.services.providers.apple.strategy import AppleStrategy
 from app.services.providers.base_strategy import HistoricalSyncResult
 from app.services.providers.garmin.strategy import GarminStrategy
 from app.services.providers.oura.strategy import OuraStrategy
+from app.services.providers.suunto.strategy import SuuntoStrategy
 from app.services.providers.whoop.strategy import WhoopStrategy
 from app.utils.exceptions import UnsupportedProviderError
 
@@ -101,6 +102,34 @@ class TestPullBasedHistoricalSync:
         start = datetime.fromisoformat(result.start_date)
         end = datetime.fromisoformat(result.end_date)
         assert (end - start).days == 7
+
+    @patch("app.services.providers.base_strategy.celery_app")
+    def test_provider_ceiling_caps_the_requested_days(self, mock_celery: MagicMock) -> None:
+        """max_historical_days is a ceiling here too, not only on connect.
+
+        The on-connect grace path in api/routes/v1/oauth.py has always capped the
+        window by the provider's own limit. This endpoint is meant to replace
+        that path, so it cannot be the looser of the two: Suunto declares 30 days
+        against a 200-call weekly budget, and honouring a caller's 90 spends
+        quota on a window Suunto was never going to serve in full.
+        """
+        mock_celery.send_task.return_value = MagicMock(id="task-suunto-1")
+        user_id = uuid4()
+
+        result = SuuntoStrategy().start_historical_sync(user_id, days=90)
+
+        assert result.days == 30
+        start = datetime.fromisoformat(result.start_date)
+        end = datetime.fromisoformat(result.end_date)
+        assert (end - start).days == 30
+
+    @patch("app.services.providers.base_strategy.celery_app")
+    def test_a_window_inside_the_ceiling_is_left_alone(self, mock_celery: MagicMock) -> None:
+        mock_celery.send_task.return_value = MagicMock(id="task-suunto-2")
+
+        result = SuuntoStrategy().start_historical_sync(uuid4(), days=7)
+
+        assert result.days == 7
 
 
 class TestGarminHistoricalSync:

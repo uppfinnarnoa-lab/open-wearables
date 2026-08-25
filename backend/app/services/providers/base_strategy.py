@@ -194,6 +194,15 @@ class BaseProviderStrategy(ABC):
         if not self.capabilities.rest_pull:
             raise UnsupportedProviderError(self.name, "historical sync")
 
+        # Honour the provider's own ceiling, exactly as the on-connect grace path
+        # in api/routes/v1/oauth.py does. This endpoint is meant to replace that
+        # path, so it cannot be the looser of the two: a provider that declares
+        # max_historical_days means it, and asking for the caller's 90 days
+        # regardless spends a metered call budget on a window the provider was
+        # never going to serve in full.
+        if self.capabilities.max_historical_days is not None:
+            days = min(days, self.capabilities.max_historical_days)
+
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
 
