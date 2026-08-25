@@ -320,9 +320,19 @@ class Settings(BaseSettings):
 
         Uses the legacy per-provider *_REDIRECT_URI env var if set,
         otherwise builds the URI from API_BASE_URL.
+
+        "Set" means set to something. A bare ``SUUNTO_REDIRECT_URI=`` line in an
+        .env file arrives here as an empty string, which is not None and used to
+        win over API_BASE_URL — so the authorize URL went out with
+        ``redirect_uri=`` and the provider answered "at least one redirect_uri
+        must be registered with the client". The env var meant to be a leftover
+        was silently authoritative. Blank now falls through, matching how
+        PULL_SYNC_LOOKBACK treats an empty value a few lines above.
         """
         legacy_attr = f"{provider.value}_redirect_uri"
         legacy_value = getattr(self, legacy_attr, None)
+        if isinstance(legacy_value, str) and not legacy_value.strip():
+            legacy_value = None
         if legacy_value is not None:
             warnings.warn(
                 f"{legacy_attr.upper()} is deprecated, use API_BASE_URL instead.",
