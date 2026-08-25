@@ -13,6 +13,11 @@ ACTIVITY_SERIES: dict[str, SeriesType] = {
 TIMESERIES: frozenset[SeriesType] = frozenset(
     {
         *ACTIVITY_SERIES.values(),  # /v3/users/activities
+        # /v3/exercises?route=true — the exercise route array. Polar's route points
+        # carry latitude and longitude only, so unlike the FIT-derived tracks from
+        # Garmin and Suunto there is no elevation to claim here.
+        SeriesType.latitude,
+        SeriesType.longitude,
         SeriesType.heart_rate,  # /v3/users/sleep + /v3/users/continuous-heart-rate + /v3/users/wrist-ecg
         SeriesType.heart_rate_variability_rmssd,  # /v3/users/spo2 + /v3/users/wrist-ecg
         SeriesType.oxygen_saturation,  # /v3/users/spo2

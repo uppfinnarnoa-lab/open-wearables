@@ -24,6 +24,7 @@ Polar provides access to exercise, daily activity, sleep, and heart rate data fr
 | Data Type | Support |
 |-----------|---------|
 | Workouts / Exercises | Yes (with optional HR samples, zones, route) |
+| GPS route (latitude / longitude) | Yes, when `INGEST_WORKOUT_SAMPLES=true` — see note below |
 | Sleep (with stages) | Yes |
 | Daily activity (steps, calories, activity zones) | Yes |
 | Continuous heart rate | Yes |
@@ -40,12 +41,21 @@ Polar provides access to exercise, daily activity, sleep, and heart rate data fr
 
 | Method | Description |
 |--------|-------------|
-| **Polling (pull) — Exercises** | Open Wearables fetches exercises via the AccessLink v3 API (`/v3/exercises`). Returns all exercises available in Polar Flow for the connected user. |
+| **Polling (pull) — Exercises** | Open Wearables fetches exercises via the AccessLink v3 API (`/v3/exercises`). Polar returns only exercises **uploaded to Flow in the last 30 days**, and only those **uploaded after the user was registered** with your client — see the limits below. |
 | **Polling (pull) — 24/7 data** | Sleep, daily activity, continuous HR, Nightly Recharge, cardio load, and Elixir/Sleepwise metrics are fetched via range endpoints covering the last 90 days. |
 | **Webhooks (push)** | Polar sends a lightweight notification on each event (exercise, sleep, activity, etc.). Open Wearables acknowledges immediately and enqueues a targeted sync for the affected data type. |
 
 <Note>
 Webhook delivery requires a registered webhook subscription and `POLAR_WEBHOOK_SIGNATURE_SECRET` set in your environment. See the configuration step below.
+</Note>
+
+<Note>
+The exercise **route** is the only place a Polar workout's GPS track exists, and it
+rides along in the same `/v3/exercises` response — no extra API call. It is still
+per-second data, so it follows the same gate as every other provider's samples:
+set `INGEST_WORKOUT_SAMPLES=true` or a Polar workout arrives without a track.
+Polar route points carry latitude and longitude only; there is no elevation,
+unlike the FIT-derived tracks from Garmin and Suunto.
 </Note>
 
 ## What you need by the end
@@ -171,8 +181,23 @@ POLAR_WEBHOOK_SIGNATURE_SECRET=
     ```
 
     <Note>
-    Exercises are fetched from `/v3/exercises` which returns all exercises available in Polar Flow for the connected user (no date filter). 24/7 data (sleep, activity, HR, etc.) is fetched over a 90-day lookback window using range endpoints.
+    Exercises are fetched from `/v3/exercises`, which takes no date filter — the window is Polar's, not ours (see the limits below). 24/7 data (sleep, activity, HR, etc.) is fetched over a 90-day lookback window using range endpoints.
     </Note>
+
+    <Warning>
+    **A newly connected Polar account is expected to return zero exercises.** Polar
+    documents two limits on `/v3/exercises`:
+
+    - only exercises uploaded to Flow in the **last 30 days** are returned, and
+    - only exercises uploaded **after the user was registered** with your client.
+
+    There is therefore no historical backfill for Polar: the first exercise appears
+    after the athlete next syncs their watch to Polar Flow. An empty list right
+    after connecting is not a failure. A list that is still empty after a new
+    training has been uploaded to Flow *is* — check the logs for
+    `Polar user registration rejected`, which means `POST /v3/users` never
+    succeeded and no exercise will ever be delivered for that connection.
+    </Warning>
   </Step>
 
   <Step title="Verify the integration">
