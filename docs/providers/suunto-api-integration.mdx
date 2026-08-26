@@ -40,7 +40,7 @@ Access requires membership in the **Suunto Developer Program** - you must apply 
 | Method | Description |
 |--------|-------------|
 | **Webhooks (push)** | Suunto pushes each event to your notification URL with the data delivered inline. Open Wearables acknowledges within Suunto's 2-second timeout and processes the payload asynchronously. Handles `WORKOUT_CREATED`, `SUUNTO_247_ACTIVITY_CREATED`, `SUUNTO_247_SLEEP_CREATED`, and `SUUNTO_247_RECOVERY_CREATED` (`ROUTE_CREATED` is acknowledged but ignored). |
-| **Polling (pull)** | Open Wearables fetches workouts (`/v3/workouts/`) and 24/7 data (`/247samples/*`, `/247/daily-activity-statistics`) over REST for historical sync and as a fallback. |
+| **Polling (pull)** | Open Wearables fetches workouts (`/v3/workouts/`) and 24/7 data (`/247samples/*`, `/247/daily-activity-statistics`) over REST **on request only** - historical backfill, or an explicit `/sync`. Suunto is deliberately excluded from the periodic poll (`default_live_sync_mode = WEBHOOK`), so REST is not a fallback for live data the way it is for other providers. |
 
 <Note>
 Webhook payloads are signed with HMAC-SHA256 over the raw request body, delivered in the `X-HMAC-SHA256-Signature` header. Open Wearables verifies this against `SUUNTO_WEBHOOK_SECRET` (which defaults to your app `SECRET_KEY`). See the configuration step below.
@@ -178,19 +178,55 @@ SUUNTO_SUBSCRIPTION_KEY=private-subscription-id
     </Note>
   </Step>
 
-  <Step title="Enable webhooks (optional)">
+  <Step title="Enable webhooks">
     Suunto delivers events in **push** mode - each notification carries the data inline, so no extra fetch is needed (workouts are re-fetched via REST using their `workoutKey` to guarantee the canonical schema).
 
-    Webhooks are configured on Suunto's side: register your notification URL with Suunto and point it at:
+    <Warning>
+    **Not optional for Suunto.** Suunto declares `default_live_sync_mode = WEBHOOK`, which
+    excludes it from the periodic REST poll on purpose: its notifications arrive complete, and
+    the Developer tier allows only 200 calls a week, so polling would spend the quota
+    re-asking for data that already arrived. With no notification URL configured, Suunto data
+    reaches Open Wearables **only** when something calls `/sync` or `/sync/historical`
+    explicitly. Other providers fall back to polling; this one does not.
+    </Warning>
 
-    ```
-    {API_BASE_URL}/api/v1/providers/suunto/webhooks
-    ```
+    Everything is configured on Suunto's side, in the same **Profile** page as the OAuth
+    settings. The portal offers one field per event type; Open Wearables exposes a single
+    endpoint that dispatches on the payload's event type, so they all get the same URL:
 
-    Suunto signs each request body with HMAC-SHA256 and sends the result in the `X-HMAC-SHA256-Signature` header. Open Wearables verifies it against `SUUNTO_WEBHOOK_SECRET` (defaulting to `SECRET_KEY`), so make sure the notification secret configured with Suunto matches that value.
+    | Suunto field | Value |
+    |---|---|
+    | Workout notification URL *(legacy form data)* | **Leave empty** - see below |
+    | Workout notification URL | `{API_BASE_URL}/api/v1/providers/suunto/webhooks` |
+    | Route notification URL | same URL (`ROUTE_CREATED` is acknowledged and ignored) |
+    | 247 activity notification URL | same URL |
+    | 247 sleep notification URL | same URL |
+    | 247 recovery notification URL | same URL |
+    | Notification access token | Leave empty - Open Wearables does not read it |
+    | Notification access secret | Your `SUUNTO_WEBHOOK_SECRET` |
+    | Notification sending | **Enabled** |
+
+    <Warning>
+    Leave the **legacy form data** field empty. It makes Suunto post
+    `application/x-www-form-urlencoded` bodies, and the handler parses JSON - a body it cannot
+    read is rejected with a 400, and every workout notification is lost. Filling both fields
+    delivers each workout twice, once in a shape that fails.
+    </Warning>
+
+    Suunto signs each request body with HMAC-SHA256 and sends the result in the
+    `X-HMAC-SHA256-Signature` header. Open Wearables verifies it against
+    `SUUNTO_WEBHOOK_SECRET`, which defaults to your app `SECRET_KEY`.
 
     <Note>
-    The endpoint acknowledges within Suunto's 2-second timeout and enqueues processing in the background. If webhooks aren't configured, periodic REST polling still keeps data current.
+    **Set `SUUNTO_WEBHOOK_SECRET` explicitly** rather than relying on that default. The
+    notification secret has to be typed into Suunto's portal, and `SECRET_KEY` signs
+    everything else your deployment issues - it should not leave your server. Generate a
+    separate random value, put it in both places, and the two secrets stay independent.
+    </Note>
+
+    <Note>
+    The endpoint acknowledges within Suunto's 2-second timeout and enqueues processing in the
+    background.
     </Note>
   </Step>
 
