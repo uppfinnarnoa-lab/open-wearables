@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
@@ -19,6 +20,7 @@ from app.services.provider_settings_service import ProviderSettingsService
 from app.services.providers.base_strategy import BaseProviderStrategy
 from app.services.providers.factory import ProviderFactory
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 factory = ProviderFactory()
 settings_service = ProviderSettingsService()
@@ -54,6 +56,16 @@ def authorize_provider(
     Returns authorization URL where user should be redirected to log in.
     """
     strategy = get_oauth_strategy(provider)
+
+    # This endpoint is unauthenticated by design -- the pairing page is a link a
+    # developer hands to an end user who has no account here -- so redirect_uri
+    # arrives attacker-controlled. Refuse before a state is minted, not after the
+    # provider callback has already turned it into a 303.
+    if redirect_uri is not None and not settings.is_allowed_redirect_uri(redirect_uri):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="redirect_uri is not an allowed origin",
+        )
 
     assert strategy.oauth
     auth_url, state = strategy.oauth.get_authorization_url(user_id, redirect_uri)
@@ -127,9 +139,17 @@ def oauth_callback(
                 is_historical=True,
             )
 
-    # If a specific redirect_uri was requested (e.g. by frontend), redirect there
+    # If a specific redirect_uri was requested (e.g. by frontend), redirect there.
+    # Re-checked rather than trusted: states minted before the authorize-side check
+    # existed are still live in Redis, and this is the step that actually moves the
+    # user. A value that fails now falls through to the internal success page.
     if oauth_state.redirect_uri:
-        return RedirectResponse(url=oauth_state.redirect_uri, status_code=303)
+        if settings.is_allowed_redirect_uri(oauth_state.redirect_uri):
+            return RedirectResponse(url=oauth_state.redirect_uri, status_code=303)
+        logger.warning(
+            "Discarded disallowed OAuth redirect_uri for provider %s",
+            provider.value,
+        )
 
     # Otherwise, redirect to internal success page
     return RedirectResponse(

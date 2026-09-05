@@ -5,7 +5,7 @@ from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 if TYPE_CHECKING:
     from app.schemas.enums import ProviderName
@@ -129,6 +129,11 @@ class Settings(BaseSettings):
 
     # API SETTINGS
     api_base_url: str = "http://localhost:8000"
+
+    # Extra origins the post-OAuth ``redirect_uri`` may point at, beyond
+    # API_BASE_URL, FRONTEND_URL and CORS_ORIGINS. Comma-separated origins
+    # ("https://app.example"), no path. See is_allowed_redirect_uri.
+    oauth_allowed_redirect_origins: list[str] = []
 
     # SUUNTO OAUTH SETTINGS
     suunto_client_id: str | None = None
@@ -314,6 +319,46 @@ class Settings(BaseSettings):
         if isinstance(v, str) and not v.strip():
             return None
         return parse_duration(str(v))  # "2d" / "20h" / "1d12h" → timedelta (fail fast at startup)
+
+    @staticmethod
+    def _origin(url: str) -> str | None:
+        """``scheme://host[:port]`` of *url*, or None when it has no usable origin."""
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+    def allowed_redirect_origins(self) -> set[str]:
+        """Origins the post-OAuth redirect may send a user to."""
+        candidates = [self.api_base_url, self.frontend_url]
+        candidates += [str(o) for o in self.cors_origins]
+        candidates += list(self.oauth_allowed_redirect_origins)
+        return {origin for origin in (self._origin(c) for c in candidates) if origin}
+
+    def is_allowed_redirect_uri(self, redirect_uri: str) -> bool:
+        """True if *redirect_uri* is somewhere we are willing to send a user.
+
+        ``/oauth/{provider}/authorize`` is unauthenticated on purpose: the pairing
+        page is a link a developer hands to an end user who has no account here.
+        That makes this value attacker-supplied, and it survives in Redis until the
+        provider callback turns it into a 303. Unchecked, that is an open redirect
+        on the callback -- and the finishing move for account linking, where a
+        crafted pairing link carries the attacker's ``user_id``, the victim
+        authorises their own device, and the connection is written against the
+        attacker's account while the victim is sent somewhere reassuring.
+
+        A relative path is same-site by construction and always allowed. Anything
+        else must match a configured origin exactly; a prefix match would accept
+        ``https://app.example.evil.test`` for ``https://app.example``.
+        """
+        candidate = redirect_uri.strip()
+        if not candidate:
+            return False
+        # "//host/path" is a network-path reference, not a relative path.
+        if candidate.startswith("/") and not candidate.startswith("//"):
+            return True
+        origin = self._origin(candidate)
+        return origin is not None and origin in self.allowed_redirect_origins()
 
     def oauth_redirect_uri(self, provider: ProviderName) -> str:
         """Build OAuth redirect URI for a provider.

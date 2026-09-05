@@ -503,6 +503,18 @@ curl "http://localhost:8000/api/v1/oauth/garmin/authorize?user_id=USER_ID&redire
   -H "X-Open-Wearables-API-Key: YOUR_API_KEY"
 ```
 
+<Warning>
+The `redirect_uri` must sit on an allowed origin, or the call is refused with
+`400 redirect_uri is not an allowed origin`. Allowed are `API_BASE_URL`,
+`FRONTEND_URL`, every entry in `CORS_ORIGINS`, and anything you add to
+`OAUTH_ALLOWED_REDIRECT_ORIGINS`. Relative paths are always allowed.
+
+The check exists because `/oauth/{provider}/authorize` is deliberately
+unauthenticated — the pairing page is a link you hand to an end user who has no
+account here — so this parameter is attacker-supplied by design. Without the
+allowlist it becomes an open redirect on the OAuth callback.
+</Warning>
+
 ### Check Connection Status
 
 Verify a user's connected providers:

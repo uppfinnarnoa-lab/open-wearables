@@ -7,12 +7,13 @@ Tests the /api/v1/oauth endpoints including:
 - PUT /api/v1/oauth/providers/{provider} - test update provider status
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from tests.factories import DeveloperFactory
 from tests.utils import developer_auth_headers
 
@@ -41,10 +42,14 @@ class TestOAuthAuthorizeEndpoint:
         assert len(data["state"]) > 0
 
     def test_authorize_provider_with_redirect_uri(self, client: TestClient, db: Session) -> None:
-        """Test OAuth flow with optional redirect URI."""
+        """Test OAuth flow with optional redirect URI.
+
+        The URI has to sit on an allowed origin -- see
+        TestAuthorizeRedirectUriAllowlist for why an arbitrary host is refused.
+        """
         # Arrange
         user_id = uuid4()
-        redirect_uri = "https://myapp.com/oauth/callback"
+        redirect_uri = f"{settings.frontend_url}/oauth/callback"
 
         # Act
         response = client.get(
@@ -419,3 +424,93 @@ class TestOAuthUpdateProviderEndpoint:
             data = response.json()
             assert data["provider"] == provider
             assert data["is_enabled"] is True
+
+
+class TestAuthorizeRedirectUriAllowlist:
+    """The post-flow ``redirect_uri`` must be confined to origins we trust.
+
+    ``/oauth/{provider}/authorize`` is deliberately unauthenticated -- the pairing
+    page is a link a developer hands to their end user, who has no account here.
+    That makes the query string attacker-supplied by design, and the value lands
+    in Redis and comes back out as a 303 once the provider callback succeeds.
+    Without an allowlist that is an open redirect on the callback, and it hands an
+    attacker a finishing move for account linking: craft a pairing link carrying
+    their own ``user_id``, let the victim authorise their real watch, and send the
+    victim onward to a page of the attacker's choosing while the connection is
+    written against the attacker's account.
+    """
+
+    def test_rejects_foreign_origin(self, client: TestClient, db: Session) -> None:
+        """A redirect_uri pointing off our origins is refused before state is minted."""
+        response = client.get(
+            "/api/v1/oauth/garmin/authorize",
+            params={
+                "user_id": str(uuid4()),
+                "redirect_uri": "https://evil.example/steal",
+            },
+        )
+
+        assert response.status_code == 400
+        assert "redirect_uri" in response.json()["detail"]
+
+    def test_allows_api_base_url_origin(self, client: TestClient, db: Session) -> None:
+        """The deployment's own origin is always allowed."""
+        response = client.get(
+            "/api/v1/oauth/garmin/authorize",
+            params={
+                "user_id": str(uuid4()),
+                "redirect_uri": f"{settings.api_base_url}/users/x/pair/success",
+            },
+        )
+
+        assert response.status_code == 200
+
+    def test_allows_relative_path(self, client: TestClient, db: Session) -> None:
+        """A same-site relative path carries no origin to escape to."""
+        response = client.get(
+            "/api/v1/oauth/garmin/authorize",
+            params={
+                "user_id": str(uuid4()),
+                "redirect_uri": "/users/x/pair/success?provider=garmin",
+            },
+        )
+
+        assert response.status_code == 200
+
+    def test_allows_configured_origin(self, client: TestClient, db: Session) -> None:
+        """An origin a deployment declares is accepted."""
+        with patch.object(settings, "oauth_allowed_redirect_origins", ["https://app.example"]):
+            response = client.get(
+                "/api/v1/oauth/garmin/authorize",
+                params={
+                    "user_id": str(uuid4()),
+                    "redirect_uri": "https://app.example/done",
+                },
+            )
+
+        assert response.status_code == 200
+
+    def test_rejects_protocol_relative_url(self, client: TestClient, db: Session) -> None:
+        """``//evil.example`` is a network-path reference, not a relative path."""
+        response = client.get(
+            "/api/v1/oauth/garmin/authorize",
+            params={
+                "user_id": str(uuid4()),
+                "redirect_uri": "//evil.example/steal",
+            },
+        )
+
+        assert response.status_code == 400
+
+    def test_rejects_origin_prefix_lookalike(self, client: TestClient, db: Session) -> None:
+        """A host that merely starts with an allowed one must not pass."""
+        with patch.object(settings, "oauth_allowed_redirect_origins", ["https://app.example"]):
+            response = client.get(
+                "/api/v1/oauth/garmin/authorize",
+                params={
+                    "user_id": str(uuid4()),
+                    "redirect_uri": "https://app.example.evil.test/done",
+                },
+            )
+
+        assert response.status_code == 400
