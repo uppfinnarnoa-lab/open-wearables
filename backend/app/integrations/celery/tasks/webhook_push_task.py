@@ -15,6 +15,7 @@ from celery import Task, shared_task
 from fastapi import HTTPException
 
 from app.database import SessionLocal
+from app.integrations.redis_client import get_redis_client
 from app.schemas.sync_status import SyncStatus
 from app.services import sync_status_service
 from app.services.providers.factory import ProviderFactory
@@ -30,6 +31,11 @@ _NONRETRIABLE_UPSTREAM_STATUSES = frozenset({400, 403, 404, 410, 422})
 # Garmin self-reports sync status from its own handler/backfill, so it is excluded
 # here to avoid duplicate run entries.
 _SYNC_LOG_PROVIDERS = frozenset({"oura", "strava", "polar", "whoop", "suunto"})
+
+# How long a per-identity drop counter lives. Long enough that a connection
+# broken for days reads as one rising number rather than a fresh incident each
+# time the counter quietly expired underneath it.
+_UNATTRIBUTED_TTL_SECONDS = 30 * 24 * 3600
 
 # process_payload "status" values that mean data was actually persisted.
 _SAVED_STATUSES = frozenset({"processed", "saved", "accepted", "deleted", "success"})
@@ -68,20 +74,66 @@ def _extract_breakdown(result: dict[str, Any], count: Any) -> dict[str, int] | N
     return {"inserted": inserted or 0, "updated": updated or 0}
 
 
-def _emit_webhook_sync_status(provider_name: str, result: Any) -> None:
+def _record_unresolved_delivery(provider_name: str, result: dict[str, Any], provider_user_id: str | None) -> None:
+    """Record a delivery that never resolved to one of our users.
+
+    There is no user to attribute a sync run to, so no sync-status event can be
+    emitted -- that part is unavoidable. What is avoidable is the delivery
+    vanishing. Suunto pushed 77 events for a real person over six days while his
+    connection silently did not exist, and every one was accepted, enqueued,
+    dropped, and reported by Celery as ``succeeded``. The only trace was 77
+    identical warnings.
+
+    So: error level, a stable ``action`` to alert on, and a running count per
+    identity, because the seventy-seventh drop should not read like the first.
+    The counter is best effort -- the line is written with or without it.
+    """
+    identity = provider_user_id or "unknown"
+    dropped_total: int | None = None
+    try:
+        redis_client = get_redis_client()
+        key = f"webhook:unattributed:{provider_name}:{identity}"
+        dropped_total = int(redis_client.incr(key))
+        redis_client.expire(key, _UNATTRIBUTED_TTL_SECONDS)
+    except Exception as exc:  # pragma: no cover - counting must never gate the log
+        logger.debug("Could not count unattributed delivery: %s", exc, exc_info=True)
+
+    log_structured(
+        logger,
+        "error",
+        "Webhook delivery accepted for a user we have no connection for -- data discarded",
+        provider=provider_name,
+        action="webhook_delivery_unattributed",
+        provider_user_id=identity,
+        event_type=result.get("event_type"),
+        reason=result.get("status"),
+        dropped_total=dropped_total,
+    )
+
+
+def _emit_webhook_sync_status(provider_name: str, result: Any, provider_user_id: str | None = None) -> None:
     """Record a webhook delivery in the sync log (best-effort, never raises).
 
     Saves and errors become full run entries; ignored / duplicate / no-op
     deliveries are recorded as SKIPPED so the UI can filter them out.
     Deliveries that never resolved to a user (invalid payload, user_not_found)
-    are skipped entirely — there is no user to attribute the run to.
+    emit no sync event — there is no user to attribute the run to — but they are
+    not silent: see _record_unresolved_delivery.
     """
     try:
-        if provider_name not in _SYNC_LOG_PROVIDERS or not isinstance(result, dict):
+        if not isinstance(result, dict):
             return
 
         raw_user_id = result.get("user_id")
         if not raw_user_id:
+            # Recorded for every provider, ahead of the _SYNC_LOG_PROVIDERS filter:
+            # that filter exists to avoid duplicating a self-reporting provider's
+            # sync status, which has nothing to do with data arriving for someone
+            # we cannot place.
+            _record_unresolved_delivery(provider_name, result, provider_user_id)
+            return
+
+        if provider_name not in _SYNC_LOG_PROVIDERS:
             return
         try:
             user_id = UUID(str(raw_user_id))
@@ -155,7 +207,7 @@ def process_webhook_push(
         provider_user_id = handler.extract_user_id(payload)
         with SessionLocal() as db:
             result = handler.process_payload(db, payload, request_trace_id)
-        _emit_webhook_sync_status(provider_name, result)
+        _emit_webhook_sync_status(provider_name, result, provider_user_id)
         return result
     except ValueError as exc:
         # Configuration error (unknown provider, missing handler) — retrying won't help.

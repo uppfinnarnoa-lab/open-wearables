@@ -102,3 +102,65 @@ def test_emission_never_raises() -> None:
         task._emit_webhook_sync_status("oura", None)
         task._emit_webhook_sync_status("oura", {"status": "processed", "records_saved": 1, "user_id": "not-a-uuid"})
     assert calls == []
+
+
+class TestUnattributedDelivery:
+    """A delivery that resolves to no user is data we accepted and threw away.
+
+    There is genuinely no user to attribute a sync run to, so no sync-status
+    event can be emitted -- that part of the old behaviour is correct and stays.
+    What was wrong is that the delivery then vanished: a warning, and a Celery
+    task reporting 'succeeded'.
+
+    Suunto pushed 77 events for a real person over six days while his OAuth
+    connection silently did not exist (a wrong client secret, fixed 2026-09-05).
+    Every one was accepted, enqueued, dropped and reported as success. Nothing in
+    the sync log, no counter, no alertable line -- the only trace was 77 identical
+    warnings nobody was reading. Six days of someone's health data, discarded in
+    a way the system called normal.
+    """
+
+    def test_still_emits_no_sync_event(self) -> None:
+        """No user means no run to attribute -- that much was always right."""
+        calls, fake = _capture()
+        with patch.object(task.sync_status_service, "webhook_delivered", side_effect=fake):
+            task._emit_webhook_sync_status("suunto", {"status": "user_not_found"}, "nils26071")
+        assert calls == []
+
+    def test_logs_at_error_with_a_stable_action(self) -> None:
+        """Loud and greppable, so a rising count is something you can alert on."""
+        with (
+            patch.object(task.sync_status_service, "webhook_delivered"),
+            patch.object(task, "log_structured") as logged,
+        ):
+            task._emit_webhook_sync_status("suunto", {"status": "user_not_found"}, "nils26071")
+
+        assert logged.call_args_list, "an unattributed delivery must be logged"
+        level = logged.call_args_list[-1].args[1]
+        fields = logged.call_args_list[-1].kwargs
+        assert level == "error"
+        assert fields.get("action") == "webhook_delivery_unattributed"
+        assert fields.get("provider_user_id") == "nils26071"
+
+    def test_counts_repeat_offenders(self) -> None:
+        """The 77th drop must not look like the 1st."""
+        identity = f"user-{uuid4()}"
+        counts = []
+        with (
+            patch.object(task.sync_status_service, "webhook_delivered"),
+            patch.object(task, "log_structured") as logged,
+        ):
+            for _ in range(3):
+                task._emit_webhook_sync_status("suunto", {"status": "user_not_found"}, identity)
+                counts.append(logged.call_args_list[-1].kwargs.get("dropped_total"))
+        assert counts == [1, 2, 3]
+
+    def test_never_raises_when_the_counter_is_unavailable(self) -> None:
+        """Bookkeeping must not break webhook processing -- it is still only a log."""
+        with (
+            patch.object(task.sync_status_service, "webhook_delivered"),
+            patch.object(task, "get_redis_client", side_effect=RuntimeError("redis down")),
+            patch.object(task, "log_structured") as logged,
+        ):
+            task._emit_webhook_sync_status("suunto", {"status": "user_not_found"}, "nils26071")
+        assert logged.call_args_list, "the line must still be written without a counter"
