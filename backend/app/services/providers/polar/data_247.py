@@ -108,9 +108,6 @@ class Polar247Data(Base247DataTemplate):
             # 404 = no data for this date / feature not available on this device
             if e.status_code == status.HTTP_404_NOT_FOUND:
                 return None
-            # 204 No Content: api_client raises 500 wrapping a JSONDecodeError on empty body
-            if e.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR and "Expecting value" in str(e.detail):
-                return None
             raise
 
     def _parse_time_key(self, key: str) -> time:

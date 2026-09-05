@@ -201,6 +201,15 @@ def make_authenticated_request(
                     "accepted": response.status_code == 202,
                 }
 
+            # An empty body is a result, not a failure. Polar answers 204 No Content
+            # when a user has nothing new for a data type -- the routine case, once
+            # per quiet sync per type. Calling .json() on it raises, and that raise
+            # used to be logged as "API request failed" and wrapped in a 500, so a
+            # normal sync wrote error lines that bury real ones. A body that is
+            # present but unparseable is a different thing and still fails loudly.
+            if response.status_code == status.HTTP_204_NO_CONTENT or not response.content:
+                return None
+
             result = response.json()
 
             # Some APIs (like Suunto) return 200 OK but include error in response body
